@@ -1,0 +1,168 @@
+#include <Wire.h>
+#include <MCP342x.h>
+
+// MCP3424 default I2C address
+uint8_t address = 0x68;
+MCP342x adc = MCP342x(address);
+
+// Raw ADC readings
+long ch1Value = 0;
+long ch2Value = 0;
+long ch3Value = 0;
+long ch4Value = 0;
+
+// Calculated voltages and temperatures
+float ch1Voltage = 0;
+float ch2Voltage = 0;
+float ch3Voltage = 0;
+float ch4Voltage = 0;
+
+float ch1Temp = 0; // top TC, Hot Side
+float ch2Temp = 0;
+float ch3Temp = 0;
+float ch4Temp = 0; // bottom TC, Cold Side
+
+float qHot = 0; // Heat flow in hot meter bar, W
+float qCold = 0; // Heat flow in cold meter bar, W
+float qAverage = 0; // Average heat flow through specimen, W
+
+float tHot = 0; // Temperature of hot meter bar surface, *C
+float tCold = 0; // Temperature of cold meter bar surface, *C
+
+const float aluminumTC = 167;     // Thermal Conductiivty of Aluminum 6061 at RT, W/m*K
+const float meterArea = 0.000625; // Area of the meter bar, m^2
+
+const float hotDistance = .0224;  // Difference between two thermocouples, m
+const float coldDistance = .0224; // Difference between two thermocouples, m
+
+const float dA = 0.0254; // distance between T1 and T2, m
+const float dB = 0.003; // distance between T2 and the hot surface, m
+const float dC = 0.0254; // distance between T3 and T4, m
+const float dD = 0.003; // distance between T3 and the cold surface, m
+
+float thermalImpedance = 0; // Calculated value, (K * m^2) / W
+
+// Constants
+const float convVolts = 1.953; // µV per ADC count (approx for PGA=8, 18-bit)
+const float convTemp = 41.0;   // µV/°C for K-type
+const int roomTemp = 25;       // Cold junction reference temperature
+
+unsigned long lastPrint = 0;
+const int printInterval = 1000; // ms
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  pinMode(9, OUTPUT);
+  digitalWrite(9, HIGH);
+  
+  MCP342x::generalCallReset();
+  delay(1);
+  
+  Wire.requestFrom(address, (uint8_t)1);
+  if (!Wire.available()) {
+    Serial.print("No device found at address 0x");
+    Serial.println(address, HEX);
+    while (1);
+  }
+
+  Serial.println("MCP3424 found and ready.");
+}
+
+void loop() {
+  unsigned long timestamp = millis();
+
+  if (timestamp - lastPrint >= printInterval) {
+    lastPrint = timestamp;
+    readValues();
+    convertToTemp();
+    heatCalcs();
+    printFunction(timestamp);
+  }
+}
+
+void readValues() {
+  MCP342x::Config status;
+  uint8_t err;
+
+  err = adc.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch1Value, status);
+  if (err) Serial.println("Channel 1 error");
+
+  err = adc.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch2Value, status);
+  if (err) Serial.println("Channel 2 error");
+
+  err = adc.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch3Value, status);
+  if (err) Serial.println("Channel 3 error");
+
+  err = adc.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch4Value, status);
+  if (err) Serial.println("Channel 4 error");
+}
+
+void convertToTemp() {
+  ch1Voltage = ch1Value * convVolts;
+  ch2Voltage = ch2Value * convVolts;
+  ch3Voltage = ch3Value * convVolts;
+  ch4Voltage = ch4Value * convVolts;
+
+  ch1Temp = roomTemp + (ch1Voltage / convTemp);
+  ch2Temp = roomTemp + (ch2Voltage / convTemp);
+  ch3Temp = roomTemp + (ch3Voltage / convTemp);
+  ch4Temp = roomTemp + (ch4Voltage / convTemp);
+}
+
+void heatCalcs() {
+  qHot = ((aluminumTC * meterArea) / hotDistance) * (ch1Temp - ch2Temp);
+  qCold = ((aluminumTC * meterArea) / coldDistance) * (ch3Temp - ch4Temp);
+  qAverage = (qHot + qCold) / 2.0;
+
+  tHot = ch2Temp - (dB / dA) * (ch1Temp - ch2Temp);
+  tCold = ch3Temp - (dD / dC) * (ch3Temp - ch4Temp);
+
+  if (abs(qAverage) > 0.0001) {
+    thermalImpedance = (meterArea / qAverage) * (tHot - tCold);
+  } else {
+    thermalImpedance = NAN;
+  }
+}
+
+void printFunction(unsigned long t) {
+  Serial.println("\n=============================");
+  Serial.print("Time: ");
+  Serial.print(t / 1000.0, 2);
+  Serial.println(" s");
+  Serial.println("=============================");
+
+  // ---- RAW ADC DATA ----
+  Serial.println("Raw ADC Readings:");
+  Serial.print("CH1: "); Serial.print(ch1Value); Serial.print("\t");
+  Serial.print("CH2: "); Serial.print(ch2Value); Serial.print("\t");
+  Serial.print("CH3: "); Serial.print(ch3Value); Serial.print("\t");
+  Serial.print("CH4: "); Serial.println(ch4Value);
+
+  // ---- TEMPERATURE DATA ----
+  Serial.println("\nTemperatures (°C):");
+  Serial.print("CH1: "); Serial.print(ch1Temp, 2); Serial.print("\t");
+  Serial.print("CH2: "); Serial.print(ch2Temp, 2); Serial.print("\t");
+  Serial.print("CH3: "); Serial.print(ch3Temp, 2); Serial.print("\t");
+  Serial.print("CH4: "); Serial.println(ch4Temp, 2);
+
+  // ---- HEAT TRANSFER DATA ----
+  Serial.println("\nHeat Transfer Calculations:");
+  Serial.print("qHot (W): "); Serial.println(qHot, 6);
+  Serial.print("qCold (W): "); Serial.println(qCold, 6);
+  Serial.print("qAvg (W): "); Serial.println(qAverage, 6);
+  Serial.print("tHot (°C): "); Serial.println(tHot, 3);
+  Serial.print("tCold (°C): "); Serial.println(tCold, 3);
+  Serial.print("Thermal Impedance (K·m²/W): "); Serial.println(thermalImpedance, 8);
+  Serial.println();
+}
+
