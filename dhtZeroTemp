@@ -1,0 +1,270 @@
+#include "DHT.h"
+#include <MCP342x.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
+
+// ===== OLED SETUP =====
+#define OLED_ADDRESS 0x3C
+SSD1306AsciiWire oled;
+
+// MCP3424 default I2C address
+uint8_t address1 = 0x6A;
+uint8_t address2 = 0x6C;
+
+MCP342x adc1 = MCP342x(address1);
+MCP342x adc2 = MCP342x(address2);
+
+const int buttonPin = 4;
+bool buttonState = false;
+bool lastButtonState = false;
+
+long ch1Value = 0;
+long ch2Value = 0;
+long ch3Value = 0;
+long ch4Value = 0;
+long ch5Value = 0;
+long ch6Value = 0;
+long ch7Value = 0;
+long ch8Value = 0;
+
+float ch1Voltage = 0;
+float ch2Voltage = 0;
+float ch3Voltage = 0;
+float ch4Voltage = 0;
+float ch5Voltage = 0;
+float ch6Voltage = 0;
+float ch7Voltage = 0;
+float ch8Voltage = 0;
+
+float ch1Temp = 0;
+float ch2Temp = 0;
+float ch3Temp = 0;
+float ch4Temp = 0;
+float ch5Temp = 0;
+float ch6Temp = 0;
+float ch7Temp = 0;
+float ch8Temp = 0;
+
+long ch1Zero = 0;
+long ch2Zero = 0;
+long ch3Zero = 0;
+long ch4Zero = 0;
+long ch5Zero = 0;
+long ch6Zero = 0;
+long ch7Zero = 0;
+long ch8Zero = 0;
+
+#define DHTPIN 2     // Digital pin connected to the DHT sensor
+#define DHTTYPE DHT11   // DHT 11
+DHT dht(DHTPIN, DHTTYPE);
+
+float cjrTemp = 25;
+
+// Constants
+const float convVolts = 1.953; // µV per ADC count (approx for PGA=8, 18-bit)
+const float convTemp = 41.0;   // µV/°C for K-type
+
+float timestamp = 0;
+
+void setup() {
+Serial.begin(9600);
+
+pinMode(buttonPin, INPUT_PULLUP);
+
+dht.begin();
+
+  // OLED setup
+  oled.begin(&Adafruit128x64, OLED_ADDRESS);
+  oled.setFont(Adafruit5x7);
+  oled.clear();
+  oled.println("MCP3424 Reader");
+  oled.println("Initializing...");
+  delay(1000);
+
+ MCP342x::generalCallReset();
+  delay(1);
+}
+
+void loop() {
+
+timestamp = millis() / 1000;
+
+buttonState = digitalRead(buttonPin);
+if (buttonState != lastButtonState) {
+  if (buttonState == LOW) {
+    Serial.println("Zero Adjustment Activated");
+    zeroAdjustment();
+  } 
+  delay(50);
+}
+lastButtonState = buttonState;
+
+readValues();
+convertTemperature();
+heatCalcs();
+printFunction();
+displayFunction();
+
+}
+
+void readValues() {
+  cjrTemp = dht.readTemperature(); // Reads CJR Temperature from DHT11
+
+  MCP342x::Config status;
+  uint8_t err;
+
+  err = adc1.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch1Value, status);
+  if (err) Serial.println("Channel 1 error");
+
+  err = adc1.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch2Value, status);
+  if (err) Serial.println("Channel 2 error");
+
+  err = adc1.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch3Value, status);
+  if (err) Serial.println("Channel 3 error");
+
+  err = adc1.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch4Value, status);
+  if (err) Serial.println("Channel 4 error");
+
+  err = adc2.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch5Value, status);
+  if (err) Serial.println("Channel 5 error");
+
+  err = adc2.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch6Value, status);
+  if (err) Serial.println("Channel 6 error");
+
+  err = adc2.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch7Value, status);
+  if (err) Serial.println("Channel 7 error");
+
+  err = adc2.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch8Value, status);
+  if (err) Serial.println("Channel 8 error");
+}
+
+void zeroAdjustment() {
+
+Serial.println("Reading Zero Values");
+
+MCP342x::Config status;
+  uint8_t err;
+
+  err = adc1.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch1Zero, status);
+  if (err) Serial.println("Channel 1 error");
+
+  err = adc1.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch2Zero, status);
+  if (err) Serial.println("Channel 2 error");
+
+  err = adc1.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch3Zero, status);
+  if (err) Serial.println("Channel 3 error");
+
+  err = adc1.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch4Zero, status);
+  if (err) Serial.println("Channel 4 error");
+
+  err = adc2.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch5Zero, status);
+  if (err) Serial.println("Channel 5 error");
+
+  err = adc2.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch6Zero, status);
+  if (err) Serial.println("Channel 6 error");
+
+  err = adc2.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch7Zero, status);
+  if (err) Serial.println("Channel 7 error");
+
+  err = adc2.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch8Zero, status);
+  if (err) Serial.println("Channel 8 error");
+
+  Serial.print("Zero Values: ");
+  Serial.print(ch1Zero);
+  Serial.print(",");
+  Serial.print(ch2Zero);
+  Serial.print(",");
+  Serial.print(ch3Zero);
+  Serial.print(",");
+  Serial.print(ch4Zero);
+  Serial.print(",");
+  Serial.print(ch5Zero);
+  Serial.print(",");
+  Serial.print(ch6Zero);
+  Serial.print(",");
+  Serial.print(ch7Zero);
+  Serial.print(",");
+  Serial.println(ch8Zero);
+
+}
+
+void convertTemperature() {
+
+ch1Voltage = (ch1Value - ch1Zero) * convVolts;
+ch2Voltage = (ch2Value - ch2Zero) * convVolts;
+ch3Voltage = (ch3Value - ch3Zero) * convVolts;
+ch4Voltage = (ch4Value - ch4Zero) * convVolts;
+ch5Voltage = (ch5Value - ch5Zero) * convVolts;
+ch6Voltage = (ch6Value - ch6Zero) * convVolts;
+ch7Voltage = (ch7Value - ch7Zero) * convVolts;
+ch8Voltage = (ch8Value - ch8Zero) * convVolts;
+
+ch1Temp = cjrTemp + (ch1Value * convTemp);
+ch2Temp = cjrTemp + (ch2Value * convTemp);
+ch3Temp = cjrTemp + (ch3Value * convTemp);
+ch4Temp = cjrTemp + (ch4Value * convTemp);
+ch5Temp = cjrTemp + (ch5Value * convTemp);
+ch6Temp = cjrTemp + (ch6Value * convTemp);
+ch7Temp = cjrTemp + (ch7Value * convTemp);
+ch8Temp = cjrTemp + (ch8Value * convTemp);
+
+}
+
+void heatCalcs() {
+
+}
+
+void printFunction() {
+  Serial.print("Time: ");
+  Serial.print(timestamp);
+  Serial.println(" s");
+
+  Serial.print("CJR: ");
+  Serial.print(cjrTemp);
+  Serial.println(" C");
+}
+
+void displayFunction() {
+
+  oled.clear();
+
+  oled.print("Time: ");
+  oled.print(timestamp);
+  oled.println(" s");
+
+  oled.print("CJR Temp: ");
+  oled.print(cjrTemp);
+  oled.println(" C");
+}
