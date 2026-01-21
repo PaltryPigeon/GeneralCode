@@ -1,0 +1,38 @@
+float a = 0;
+float b = 0;
+float c = 0;
+float d = 0;
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Enter commands like 'a=10.5' or 'b=20' to change values.");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    // Read the first character to determine which variable
+    char varName = Serial.read();
+    
+    // Look for the '=' sign
+    if (Serial.find('=')) {
+      float value = Serial.parseFloat(); // Read the number after '='
+      
+      // Assign the value to the correct variable
+      switch (varName) {
+        case 'a': a = value; break;
+        case 'b': b = value; break;
+        case 'c': c = value; break;
+        case 'd': d = value; break;
+        default:
+          Serial.println("Error: Unknown variable name.");
+          return;
+      }
+      
+      // Print confirmation
+      Serial.print("Updated ");
+      Serial.print(varName);
+      Serial.print(" to: ");
+      Serial.println(value);
+    }
+  }
+}
