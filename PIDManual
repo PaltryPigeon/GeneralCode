@@ -1,0 +1,135 @@
+// Pins
+const int thermistorPin = A5;
+const int pwmPin = 11;
+
+// Thermistor parameters
+const float SERIES_RESISTOR = 100000.0;
+const float NOMINAL_RESISTANCE = 100000.0;
+const float NOMINAL_TEMPERATURE = 25.0;
+const float BETA_COEFFICIENT = 3950.0;
+
+// Global temperature variable
+float temp = 0.0;
+
+// PID variables
+float setpoint = 0;   // °C default
+float Kp = 1.3528;
+float Ki = 0.01245;
+float Kd = 0;
+
+float integral = 0.0;
+float lastError = 0.0;
+unsigned long lastTime = 0;
+
+// PWM state
+int pwmValue = 0;
+
+// -------- Thermistor function --------
+float readTemperatureC() {
+  int adcValue = analogRead(thermistorPin);
+  float voltageRatio = adcValue / 1023.0;
+  float thermistorResistance = SERIES_RESISTOR * (voltageRatio / (1.0 - voltageRatio));
+
+  float steinhart;
+  steinhart = thermistorResistance / NOMINAL_RESISTANCE;
+  steinhart = log(steinhart);
+  steinhart /= BETA_COEFFICIENT;
+  steinhart += 1.0 / (NOMINAL_TEMPERATURE + 273.15);
+  steinhart = 1.0 / steinhart;
+  steinhart -= 273.15;
+
+  return steinhart;
+}
+
+// -------- Serial command parser --------
+void handleSerial() {
+  if (!Serial.available()) return;
+
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.length() < 2) return;
+
+  char cmd = toupper(line.charAt(0));
+  float value = line.substring(1).toFloat();
+
+  switch (cmd) {
+    case 'S':
+      setpoint = value;
+      Serial.print("Setpoint = ");
+      Serial.println(setpoint);
+      break;
+    case 'P':
+      Kp = value;
+      Serial.print("Kp = ");
+      Serial.println(Kp);
+      break;
+    case 'I':
+      Ki = value;
+      Serial.print("Ki = ");
+      Serial.println(Ki);
+      break;
+    case 'D':
+      Kd = value;
+      Serial.print("Kd = ");
+      Serial.println(Kd);
+      break;
+    default:
+      Serial.println("Commands: S <temp>, P <kp>, I <ki>, D <kd>");
+      break;
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(pwmPin, OUTPUT);
+  lastTime = millis();
+
+  Serial.println("PID Temp Controller Ready");
+  Serial.println("Commands: S <temp>, P <kp>, I <ki>, D <kd>");
+}
+
+void loop() {
+  handleSerial();
+
+  // Read temperature
+  temp = readTemperatureC();
+
+  // PID computation
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0; // seconds
+  if (dt <= 0) dt = 0.001;
+
+  float error = setpoint - temp;
+  integral += error * dt;
+  float derivative = (error - lastError) / dt;
+
+  float output = Kp * error + Ki * integral + Kd * derivative;
+
+  lastError = error;
+  lastTime = now;
+
+  // Clamp output to PWM range
+  pwmValue = constrain((int)output, 0, 255);
+  analogWrite(pwmPin, pwmValue);
+
+// Debug output
+float currentError = temp - setpoint;   // what you requested
+
+Serial.print("Temp: ");
+Serial.print(temp, 2);
+Serial.print(" °C | SP: ");
+Serial.print(setpoint);
+Serial.print(" | Error: ");
+Serial.print(currentError, 2);
+Serial.print(" °C | PWM: ");
+Serial.print(pwmValue);
+Serial.print(" | Kp=");
+Serial.print(Kp);
+Serial.print(" Ki=");
+Serial.print(Ki);
+Serial.print(" Kd=");
+Serial.println(Kd);
+
+
+  delay(500);
+}
