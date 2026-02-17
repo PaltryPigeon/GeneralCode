@@ -1,0 +1,265 @@
+#include <Wire.h>
+#include <MCP342x.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
+
+// ===== MCP3424 I2C addresses =====
+uint8_t address1 = 0x6A; // First ADC
+uint8_t address2 = 0x6C; // Second ADC
+
+MCP342x adc1 = MCP342x(address1);
+MCP342x adc2 = MCP342x(address2);
+
+// ===== OLED SETUP =====
+#define OLED_ADDRESS 0x3C
+SSD1306AsciiWire oled;
+
+// ===== ZEROING / TARE SETUP =====
+const int zeroPin = 2; 
+int lastZeroState = HIGH; // State of pin 2 in the previous loop
+// Variables to hold the offset values
+long offset1_ch1 = 0, offset1_ch2 = 0, offset1_ch3 = 0, offset1_ch4 = 0;
+long offset2_ch1 = 0, offset2_ch2 = 0, offset2_ch3 = 0, offset2_ch4 = 0;
+
+// ===== RAW ADC READINGS =====
+long adc1_ch1 = 0, adc1_ch2 = 0, adc1_ch3 = 0, adc1_ch4 = 0;
+long adc2_ch1 = 0, adc2_ch2 = 0, adc2_ch3 = 0, adc2_ch4 = 0;
+
+// ===== CALCULATED VOLTAGES (µV) =====
+float adc1_v1 = 0, adc1_v2 = 0, adc1_v3 = 0, adc1_v4 = 0;
+float adc2_v1 = 0, adc2_v2 = 0, adc2_v3 = 0, adc2_v4 = 0;
+
+// ===== CALCULATED TEMPERATURES (°C) =====
+float adc1_t1 = 0, adc1_t2 = 0, adc1_t3 = 0, adc1_t4 = 0;
+float adc2_t1 = 0, adc2_t2 = 0, adc2_t3 = 0, adc2_t4 = 0;
+
+// ===== CONSTANTS =====
+const float convVolts = 1.953; // µV per ADC count (PGA=8, 18-bit)
+const float convTemp = 41.0;   // µV/°C for K-type
+const int roomTemp = 25;       // Cold junction reference
+
+unsigned long lastPrint = 0;
+const int printInterval = 1000; // ms
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+  // Setup the Zero Pin
+  pinMode(zeroPin, INPUT_PULLUP); // Pin 2 is HIGH, goes LOW when grounded
+
+  // OLED setup
+  oled.begin(&Adafruit128x64, OLED_ADDRESS);
+  oled.setFont(Adafruit5x7);
+  oled.clear();
+  oled.println("MCP3424 Reader");
+  oled.println("Initializing...");
+  delay(1000);
+
+  pinMode(9, OUTPUT);
+  digitalWrite(9, HIGH);
+   
+  MCP342x::generalCallReset();
+  delay(1);
+
+  Serial.println("Checking for MCP3424 modules...");
+
+  checkDevice(address1);
+  checkDevice(address2);
+}
+
+void loop() {
+  unsigned long timestamp = millis();
+  
+  // Read current state of the zero pin
+  int currentZeroState = digitalRead(zeroPin);
+
+  // ===== ZEROING LOGIC =====
+  // Check if button went LOW (grounded) and was previously HIGH (open)
+  if (currentZeroState == LOW && lastZeroState == HIGH) {
+    
+    // 1. Read fresh values immediately
+    readValues(adc1, adc1_ch1, adc1_ch2, adc1_ch3, adc1_ch4);
+    readValues(adc2, adc2_ch1, adc2_ch2, adc2_ch3, adc2_ch4);
+    
+    // 2. Store these current values as the offsets
+    offset1_ch1 = adc1_ch1;
+    offset1_ch2 = adc1_ch2;
+    offset1_ch3 = adc1_ch3;
+    offset1_ch4 = adc1_ch4;
+
+    offset2_ch1 = adc2_ch1;
+    offset2_ch2 = adc2_ch2;
+    offset2_ch3 = adc2_ch3;
+    offset2_ch4 = adc2_ch4;
+
+    Serial.println("\n>>> ZERO SET <<<");
+    oled.clear();
+    oled.setCursor(0,2);
+    oled.print("ZERO SET!");
+    
+    delay(50); // Small debounce
+  }
+  
+  // Update last state for next loop
+  lastZeroState = currentZeroState;
+
+  // ===== NORMAL LOOP =====
+  if (timestamp - lastPrint >= printInterval) {
+    lastPrint = timestamp;
+
+    // Read both modules
+    readValues(adc1, adc1_ch1, adc1_ch2, adc1_ch3, adc1_ch4);
+    readValues(adc2, adc2_ch1, adc2_ch2, adc2_ch3, adc2_ch4);
+
+    // Convert both modules (SUBTRACTING THE OFFSET)
+    convertToTemp(adc1_ch1 - offset1_ch1, 
+                  adc1_ch2 - offset1_ch2, 
+                  adc1_ch3 - offset1_ch3, 
+                  adc1_ch4 - offset1_ch4,
+                  adc1_v1, adc1_v2, adc1_v3, adc1_v4,
+                  adc1_t1, adc1_t2, adc1_t3, adc1_t4);
+
+    convertToTemp(adc2_ch1 - offset2_ch1, 
+                  adc2_ch2 - offset2_ch2, 
+                  adc2_ch3 - offset2_ch3, 
+                  adc2_ch4 - offset2_ch4,
+                  adc2_v1, adc2_v2, adc2_v3, adc2_v4,
+                  adc2_t1, adc2_t2, adc2_t3, adc2_t4);
+
+    // Print data to Serial
+    printFunction(timestamp);
+
+    // Display data on OLED
+    displayOLED(timestamp);
+  }
+}
+
+// ===== Helper Functions =====
+
+void checkDevice(uint8_t addr) {
+  Wire.requestFrom(addr, (uint8_t)1);
+  if (!Wire.available()) {
+    Serial.print("No device found at 0x");
+    Serial.println(addr, HEX);
+  } else {
+    Serial.print("MCP3424 found at 0x");
+    Serial.println(addr, HEX);
+  }
+}
+
+void readValues(MCP342x &adc, long &ch1, long &ch2, long &ch3, long &ch4) {
+  MCP342x::Config status;
+  uint8_t err;
+
+  err = adc.convertAndRead(MCP342x::channel1, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch1, status);
+  if (err) Serial.println("CH1 read error");
+
+  err = adc.convertAndRead(MCP342x::channel2, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch2, status);
+  if (err) Serial.println("CH2 read error");
+
+  err = adc.convertAndRead(MCP342x::channel3, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch3, status);
+  if (err) Serial.println("CH3 read error");
+
+  err = adc.convertAndRead(MCP342x::channel4, MCP342x::oneShot,
+                           MCP342x::resolution18, MCP342x::gain8,
+                           1000000, ch4, status);
+  if (err) Serial.println("CH4 read error");
+}
+
+void convertToTemp(long ch1Value, long ch2Value, long ch3Value, long ch4Value,
+                   float &v1, float &v2, float &v3, float &v4,
+                   float &t1, float &t2, float &t3, float &t4) {
+  v1 = ch1Value * convVolts;
+  v2 = ch2Value * convVolts;
+  v3 = ch3Value * convVolts;
+  v4 = ch4Value * convVolts;
+
+  t1 = roomTemp + (v1 / convTemp);
+  t2 = roomTemp + (v2 / convTemp);
+  t3 = roomTemp + (v3 / convTemp);
+  t4 = roomTemp + (v4 / convTemp);
+}
+
+void printFunction(unsigned long t) {
+  Serial.println("\n=============================");
+  Serial.print("Time: "); Serial.print(t / 1000.0, 2); Serial.println(" s");
+  Serial.println("=============================");
+
+  // ---- ADC 1 ----
+  Serial.println("ADC #1 (0x6A):");
+  
+  // Print RAW values
+  Serial.print("Raw: ");
+  Serial.print(adc1_ch1); Serial.print("\t");
+  Serial.print(adc1_ch2); Serial.print("\t");
+  Serial.print(adc1_ch3); Serial.print("\t");
+  Serial.println(adc1_ch4);
+
+  // Print NET (Zeroed) values
+  Serial.print("Net: ");
+  Serial.print(adc1_ch1 - offset1_ch1); Serial.print("\t");
+  Serial.print(adc1_ch2 - offset1_ch2); Serial.print("\t");
+  Serial.print(adc1_ch3 - offset1_ch3); Serial.print("\t");
+  Serial.println(adc1_ch4 - offset1_ch4);
+
+  Serial.print("Temp (°C): ");
+  Serial.print(adc1_t1, 2); Serial.print("\t");
+  Serial.print(adc1_t2, 2); Serial.print("\t");
+  Serial.print(adc1_t3, 2); Serial.print("\t");
+  Serial.println(adc1_t4, 2);
+
+  // ---- ADC 2 ----
+  Serial.println("\nADC #2 (0x6C):");
+  
+  // Print RAW values
+  Serial.print("Raw: ");
+  Serial.print(adc2_ch1); Serial.print("\t");
+  Serial.print(adc2_ch2); Serial.print("\t");
+  Serial.print(adc2_ch3); Serial.print("\t");
+  Serial.println(adc2_ch4);
+
+  // Print NET (Zeroed) values
+  Serial.print("Net: ");
+  Serial.print(adc2_ch1 - offset2_ch1); Serial.print("\t");
+  Serial.print(adc2_ch2 - offset2_ch2); Serial.print("\t");
+  Serial.print(adc2_ch3 - offset2_ch3); Serial.print("\t");
+  Serial.println(adc2_ch4 - offset2_ch4);
+
+  Serial.print("Temp (°C): ");
+  Serial.print(adc2_t1, 2); Serial.print("\t");
+  Serial.print(adc2_t2, 2); Serial.print("\t");
+  Serial.print(adc2_t3, 2); Serial.print("\t");
+  Serial.println(adc2_t4, 2);
+}
+
+// ===== OLED Display Function =====
+void displayOLED(unsigned long t) {
+  oled.clear();
+  oled.setCursor(0, 0);
+  oled.print("Time: ");
+  oled.print(t / 1000.0, 1);
+  oled.println(" s");
+
+  // ADC #1
+  oled.print("A1:");
+  oled.print((int)adc1_t1); oled.print(" ");
+  oled.print((int)adc1_t2); oled.print(" ");
+  oled.println((int)adc1_t3);
+  oled.print("A1-4:");
+  oled.println((int)adc1_t4);
+
+  // ADC #2
+  oled.print("A2:");
+  oled.print((int)adc2_t1); oled.print(" ");
+  oled.print((int)adc2_t2); oled.print(" ");
+  oled.println((int)adc2_t3);
+  oled.print("A2-4:");
+  oled.println((int)adc2_t4);
+}
