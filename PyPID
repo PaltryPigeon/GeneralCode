@@ -1,0 +1,189 @@
+import sys
+import serial
+import serial.tools.list_ports
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# --- Configuration ---
+BAUD_RATE = 9600
+MAX_DATA_POINTS = 200 
+
+class PIDControllerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Arduino PID Tuner & Monitor")
+        self.root.geometry("1000x900")
+
+        self.ser = None
+        self.is_connected = False
+        self.stop_thread = False
+
+        self.times = deque(maxlen=MAX_DATA_POINTS)
+        self.temps = deque(maxlen=MAX_DATA_POINTS)
+        self.setpoints = deque(maxlen=MAX_DATA_POINTS)
+
+        # UI Components
+        self.create_connection_frame()
+        self.create_control_frame()
+        
+        self.paned = ttk.PanedWindow(self.root, orient="vertical")
+        self.paned.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.create_plot_frame()
+        self.create_terminal_frame()
+
+        self.anim = FuncAnimation(self.fig, self.update_plot, interval=500, cache_frame_data=False)
+
+    def create_connection_frame(self):
+        frame = ttk.LabelFrame(self.root, text="Connection & Mode", padding=10)
+        frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(frame, text="Port:").pack(side="left", padx=5)
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.port_combobox = ttk.Combobox(frame, values=ports, width=15)
+        if ports: self.port_combobox.current(0)
+        self.port_combobox.pack(side="left", padx=5)
+
+        self.btn_connect = ttk.Button(frame, text="Connect", command=self.toggle_connection)
+        self.btn_connect.pack(side="left", padx=5)
+
+        # Mode Toggle Checkbox
+        self.csv_mode_var = tk.BooleanVar(value=False)
+        self.chk_csv = ttk.Checkbutton(frame, text="CSV Data Mode (Graphing)", 
+                                      variable=self.csv_mode_var, 
+                                      command=self.toggle_csv_mode)
+        self.chk_csv.pack(side="left", padx=20)
+
+        self.btn_refresh = ttk.Button(frame, text="Refresh Ports", command=self.refresh_ports)
+        self.btn_refresh.pack(side="right", padx=5)
+
+    def create_control_frame(self):
+        frame = ttk.LabelFrame(self.root, text="PID Tuning", padding=10)
+        frame.pack(fill="x", padx=10, pady=5)
+
+        controls = [('Setpoint', 'S'), ('Kp', 'P'), ('Ki', 'I'), ('Kd', 'D')]
+        self.entries = {}
+
+        for i, (label, cmd) in enumerate(controls):
+            ttk.Label(frame, text=f"{label}:").grid(row=0, column=i*2, padx=5, pady=5)
+            ent = ttk.Entry(frame, width=8)
+            ent.grid(row=0, column=i*2+1, padx=2, pady=5)
+            self.entries[cmd] = ent
+            
+        ttk.Button(frame, text="Update All", command=self.update_all_params).grid(row=0, column=8, padx=10)
+
+    def create_plot_frame(self):
+        self.plot_container = ttk.Frame(self.paned)
+        self.paned.add(self.plot_container, weight=3)
+
+        self.fig, self.ax = plt.subplots(figsize=(5, 4))
+        self.ax.set_title("Live Temperature Data")
+        self.ax.set_ylabel("Temp (°C)")
+        self.ax.grid(True)
+        self.line_temp, = self.ax.plot([], [], 'r-', label='Temp (°C)')
+        self.line_sp, = self.ax.plot([], [], 'b--', label='Setpoint')
+        self.ax.legend()
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_container)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def create_terminal_frame(self):
+        frame = ttk.LabelFrame(self.paned, text="Raw Serial Monitor", padding=5)
+        self.paned.add(frame, weight=1)
+
+        self.terminal = scrolledtext.ScrolledText(frame, height=10, state='disabled', background="black", foreground="lime", font=("Courier", 9))
+        self.terminal.pack(fill="both", expand=True)
+
+        ctrl_frame = ttk.Frame(frame)
+        ctrl_frame.pack(fill="x")
+        
+        self.autoscroll = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ctrl_frame, text="Autoscroll", variable=self.autoscroll).pack(side="left")
+        ttk.Button(ctrl_frame, text="Clear Output", command=lambda: self.clear_terminal()).pack(side="right")
+
+    def toggle_csv_mode(self):
+        """Sends the 'x' command to toggle mode on the Arduino."""
+        if self.is_connected:
+            self.ser.write(b"x\n")
+            mode_str = "CSV" if self.csv_mode_var.get() else "Human"
+            self.log_to_terminal(f">> Requesting {mode_str} Mode...")
+        else:
+            messagebox.showwarning("Warning", "Connect to a COM port first.")
+
+    def log_to_terminal(self, message):
+        self.terminal.configure(state='normal')
+        self.terminal.insert(tk.END, message + "\n")
+        if self.autoscroll.get():
+            self.terminal.see(tk.END)
+        self.terminal.configure(state='disabled')
+
+    def clear_terminal(self):
+        self.terminal.configure(state='normal')
+        self.terminal.delete('1.0', tk.END)
+        self.terminal.configure(state='disabled')
+
+    def toggle_connection(self):
+        if not self.is_connected:
+            try:
+                self.ser = serial.Serial(self.port_combobox.get(), BAUD_RATE, timeout=0.1)
+                self.is_connected = True
+                self.btn_connect.config(text="Disconnect")
+                self.stop_thread = False
+                threading.Thread(target=self.read_serial_data, daemon=True).start()
+                
+                # Reset checkbox to False on new connection to stay in sync with Arduino default
+                self.csv_mode_var.set(False)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+        else:
+            self.stop_thread = True
+            if self.ser: self.ser.close()
+            self.is_connected = False
+            self.btn_connect.config(text="Connect")
+
+    def update_all_params(self):
+        if not self.is_connected: return
+        for cmd, entry in self.entries.items():
+            val = entry.get()
+            if val:
+                self.ser.write(f"{cmd}{val}\n".encode())
+        self.log_to_terminal(">> Sent new parameters.")
+
+    def read_serial_data(self):
+        while not self.stop_thread and self.ser and self.ser.is_open:
+            try:
+                line = self.ser.readline().decode('utf-8', errors='replace').strip()
+                if line:
+                    self.log_to_terminal(line)
+                    
+                    # Only try to graph if line looks like CSV (contains multiple commas)
+                    if line.count(',') >= 2:
+                        parts = line.split(',')
+                        try:
+                            self.times.append(float(parts[0]))
+                            self.temps.append(float(parts[1]))
+                            self.setpoints.append(float(parts[2]))
+                        except (ValueError, IndexError):
+                            pass 
+            except: break
+
+    def update_plot(self, frame):
+        if self.is_connected and len(self.times) > 1:
+            self.line_temp.set_data(self.times, self.temps)
+            self.line_sp.set_data(self.times, self.setpoints)
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw()
+
+    def refresh_ports(self):
+        self.port_combobox['values'] = [p.device for p in serial.tools.list_ports.comports()]
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PIDControllerApp(root)
+    root.mainloop()
