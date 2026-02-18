@@ -1,0 +1,340 @@
+// Pins
+
+const int thermistorPin = A5;
+
+const int pwmPin = 11;
+
+
+
+// Thermistor parameters
+
+const float SERIES_RESISTOR = 100000.0;
+
+const float NOMINAL_RESISTANCE = 100000.0;
+
+const float NOMINAL_TEMPERATURE = 25.0;
+
+const float BETA_COEFFICIENT = 3950.0;
+
+
+
+// PID term tracking (for telemetry)
+
+float Pterm = 0.0;
+
+float Iterm = 0.0;
+
+float Dterm = 0.0;
+
+float output = 0.0;
+
+
+
+
+
+// Global temperature variable
+
+float temp = 0.0;
+
+
+
+// PID variables
+
+float setpoint = 0;   // °C default
+
+float Kp = 1.3528;
+
+float Ki = 0.01245;
+
+float Kd = 0;
+
+
+
+float integral = 0.0;
+
+float lastError = 0.0;
+
+unsigned long lastTime = 0;
+
+
+
+// PWM state
+
+int pwmValue = 0;
+
+
+
+bool csvMode = false;
+
+
+
+// -------- Thermistor function --------
+
+float readTemperatureC() {
+
+  int adcValue = analogRead(thermistorPin);
+
+  float voltageRatio = adcValue / 1023.0;
+
+  float thermistorResistance = SERIES_RESISTOR * (voltageRatio / (1.0 - voltageRatio));
+
+
+
+  float steinhart;
+
+  steinhart = thermistorResistance / NOMINAL_RESISTANCE;
+
+  steinhart = log(steinhart);
+
+  steinhart /= BETA_COEFFICIENT;
+
+  steinhart += 1.0 / (NOMINAL_TEMPERATURE + 273.15);
+
+  steinhart = 1.0 / steinhart;
+
+  steinhart -= 273.15;
+
+
+
+  return steinhart;
+
+}
+
+
+
+void handleSerial() {
+
+  if (!Serial.available()) return;
+
+
+
+  String line = Serial.readStringUntil('\n');
+
+  line.trim();
+
+  if (line.length() == 0) return;
+
+
+
+  // Toggle CSV mode
+
+  if (line.equalsIgnoreCase("x")) {
+
+    csvMode = !csvMode;
+
+    Serial.println(csvMode ? "CSV MODE ON" : "CSV MODE OFF");
+
+    return;
+
+  }
+
+
+
+  if (line.length() < 2) return;
+
+
+
+  char cmd = toupper(line.charAt(0));
+
+  float value = line.substring(1).toFloat();
+
+
+
+  switch (cmd) {
+
+    case 'S': setpoint = value; break;
+
+    case 'P': Kp = value; break;
+
+    case 'I': Ki = value; break;
+
+    case 'D': Kd = value; break;
+
+    default:
+
+      Serial.println("Commands: S <temp>, P <kp>, I <ki>, D <kd>, X toggle CSV");
+
+      break;
+
+  }
+
+}
+
+
+
+
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(pwmPin, OUTPUT);
+
+  lastTime = millis();
+
+
+
+  Serial.println("PID Temp Controller Ready");
+
+  Serial.println("Commands: S <temp>, P <kp>, I <ki>, D <kd>");
+
+  Serial.println("time,temp,setpoint,error,P,I,D,output,pwm,Kp,Ki,Kd");
+
+}
+
+
+
+void loop() {
+
+  handleSerial();
+
+
+
+  // Read temperature
+
+  temp = readTemperatureC();
+
+
+
+  // PID computation
+
+  unsigned long now = millis();
+
+  float dt = (now - lastTime) / 1000.0; // seconds
+
+  if (dt <= 0) dt = 0.001;
+
+
+
+  float error = setpoint - temp;
+
+  integral += error * dt;
+
+  float derivative = (error - lastError) / dt;
+
+
+
+// Calculate individual terms and update the global variables
+  Pterm = Kp * error;
+  Iterm = Ki * integral;
+  Dterm = Kd * derivative;
+  
+  // Sum them up for the total output
+  float output = Pterm + Iterm + Dterm;
+
+
+  lastError = error;
+
+  lastTime = now;
+
+
+
+  // Clamp output to PWM range
+
+  pwmValue = constrain((int)output, 0, 255);
+
+  analogWrite(pwmPin, pwmValue);
+
+
+
+// Debug output
+
+
+
+    // ----- Telemetry -----
+
+  float currentError = temp - setpoint;
+
+float timeSeconds = now / 1000.0;
+
+
+
+if (!csvMode) {
+
+  // ----- Human readable -----
+
+  Serial.print("t=");
+
+  Serial.print(timeSeconds, 1);
+
+  Serial.print(" | T=");
+
+  Serial.print(temp, 2);
+
+  Serial.print(" | SP=");
+
+  Serial.print(setpoint, 2);
+
+  Serial.print(" | Err=");
+
+  Serial.print(currentError, 2);
+
+  Serial.print(" | P=");
+
+  Serial.print(Pterm, 2);
+
+  Serial.print(" | I=");
+
+  Serial.print(Iterm, 2);
+
+  Serial.print(" | D=");
+
+  Serial.print(Dterm, 2);
+
+  Serial.print(" | Out=");
+
+  Serial.print(output, 2);
+
+  Serial.print(" | PWM=");
+
+  Serial.print(pwmValue);
+
+  Serial.print(" | Kp=");
+
+  Serial.print(Kp, 3);
+
+  Serial.print(" Ki=");
+
+  Serial.print(Ki, 3);
+
+  Serial.print(" Kd=");
+
+  Serial.println(Kd, 3);
+
+}
+
+else {
+
+  // ----- CSV -----
+
+  Serial.print(timeSeconds, 1); Serial.print(",");
+
+  Serial.print(temp, 2); Serial.print(",");
+
+  Serial.print(setpoint, 2); Serial.print(",");
+
+  Serial.print(currentError, 2); Serial.print(",");
+
+  Serial.print(Pterm, 2); Serial.print(",");
+
+  Serial.print(Iterm, 2); Serial.print(",");
+
+  Serial.print(Dterm, 2); Serial.print(",");
+
+  Serial.print(output, 2); Serial.print(",");
+
+  Serial.print(pwmValue); Serial.print(",");
+
+  Serial.print(Kp, 3); Serial.print(",");
+
+  Serial.print(Ki, 3); Serial.print(",");
+
+  Serial.println(Kd, 3);
+
+}
+
+
+
+  delay(500);
+
+}
