@@ -1,0 +1,316 @@
+import sys
+import serial
+import serial.tools.list_ports
+import threading
+import csv
+import time
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, filedialog
+from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
+# --- Configuration ---
+BAUD_RATE = 9600
+MAX_DATA_POINTS = 300 
+
+# --- UI Styling Configuration (Projector Friendly) ---
+BASE_FONT = ("Helvetica", 14)
+BOLD_FONT = ("Helvetica", 14, "bold")
+TITLE_FONT = ("Helvetica", 16, "bold")
+MONO_FONT = ("Courier New", 18, "bold")
+TERMINAL_FONT = ("Courier New", 12)
+
+# Make Matplotlib graph text larger
+plt.rcParams.update({
+    'font.size': 14,
+    'axes.titlesize': 18,
+    'axes.labelsize': 16,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 14
+})
+
+class PIDControllerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Arduino PID Tuner & Manual Heater Control")
+        self.root.geometry("1400x950") # Slightly larger default window
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.close_application)
+
+        self.apply_sleek_styles()
+
+        self.ser = None
+        self.is_connected = False
+        self.stop_thread = False
+
+        self.is_recording = False
+        self.csv_file = None
+        self.csv_writer = None
+
+        self.times = deque(maxlen=MAX_DATA_POINTS)
+        self.temps = deque(maxlen=MAX_DATA_POINTS)
+        self.setpoints = deque(maxlen=MAX_DATA_POINTS)
+        self.outputs = deque(maxlen=MAX_DATA_POINTS) # New deque for Output %
+
+        # UI Layout
+        self.create_connection_frame()
+        self.create_control_frame()
+        
+        self.main_container = ttk.Frame(self.root)
+        self.main_container.pack(fill="both", expand=True, padx=15, pady=10)
+        
+        self.sidebar = ttk.LabelFrame(self.main_container, text="Live Status", padding=15)
+        self.sidebar.pack(side="right", fill="y", padx=(10, 0))
+        
+        self.paned = ttk.PanedWindow(self.main_container, orient="vertical")
+        self.paned.pack(side="left", fill="both", expand=True)
+
+        self.create_status_sidebar()
+        self.create_plot_frame()
+        self.create_terminal_frame()
+
+        self.anim = FuncAnimation(self.fig, self.update_plot, interval=500, cache_frame_data=False)
+
+    def apply_sleek_styles(self):
+        style = ttk.Style()
+        if 'clam' in style.theme_names():
+            style.theme_use('clam')
+        
+        style.configure('.', font=BASE_FONT)
+        style.configure('TLabelframe.Label', font=TITLE_FONT, foreground="#333333")
+        style.configure('TButton', font=BOLD_FONT, padding=6)
+        style.configure('TEntry', font=BASE_FONT, padding=5)
+        style.configure('TCombobox', font=BASE_FONT, padding=5)
+        style.configure('TCheckbutton', font=BASE_FONT)
+
+    def create_connection_frame(self):
+        frame = ttk.LabelFrame(self.root, text="Connection & Mode", padding=15)
+        frame.pack(fill="x", padx=15, pady=10)
+        
+        ttk.Label(frame, text="Port:").pack(side="left", padx=5)
+        self.port_combobox = ttk.Combobox(frame, values=[], width=20, font=BASE_FONT)
+        self.port_combobox.pack(side="left", padx=5)
+        self.refresh_ports()
+        
+        self.btn_connect = ttk.Button(frame, text="Connect", command=self.toggle_connection)
+        self.btn_connect.pack(side="left", padx=10)
+        
+        self.csv_mode_var = tk.BooleanVar(value=False)
+        self.chk_csv = ttk.Checkbutton(frame, text="CSV Data Mode", variable=self.csv_mode_var, command=self.toggle_csv_mode)
+        self.chk_csv.pack(side="left", padx=30)
+        
+        ttk.Button(frame, text="Refresh Ports", command=self.refresh_ports).pack(side="left", padx=10)
+        ttk.Button(frame, text="Quit Program", command=self.close_application).pack(side="right", padx=10)
+
+    def create_control_frame(self):
+        frame = ttk.LabelFrame(self.root, text="System Controls", padding=15)
+        frame.pack(fill="x", padx=15, pady=5)
+        
+        controls = [('Setpoint', 'S'), ('Kp', 'P'), ('Ki', 'I'), ('Kd', 'D'), ('Manual Power %', 'M')]
+        self.entries = {}
+        for i, (label, cmd) in enumerate(controls):
+            ttk.Label(frame, text=f"{label}:", font=BOLD_FONT).grid(row=0, column=i*2, padx=5, pady=5)
+            ent = ttk.Entry(frame, width=8)
+            ent.grid(row=0, column=i*2+1, padx=5, pady=5)
+            self.entries[cmd] = ent
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=0, column=10, padx=20)
+        
+        ttk.Button(btn_frame, text="Send Params", command=self.update_all_params).pack(side="left", padx=5)
+        self.btn_mode = ttk.Button(btn_frame, text="Toggle PID/Manual", command=self.send_mode_toggle)
+        self.btn_mode.pack(side="left", padx=5)
+        
+        self.btn_record = ttk.Button(frame, text="Start Recording", command=self.toggle_recording)
+        self.btn_record.grid(row=0, column=11, padx=20)
+        self.lbl_rec_status = ttk.Label(frame, text="Not Recording", foreground="red", font=BOLD_FONT)
+        self.lbl_rec_status.grid(row=0, column=12, padx=10)
+
+    def create_status_sidebar(self):
+        self.status_vars = {
+            "Mode": tk.StringVar(value="---"),
+            "Temp": tk.StringVar(value="--.--- °C"),
+            "Setpoint": tk.StringVar(value="--.--- °C"),
+            "Error": tk.StringVar(value="--.---"),
+            "P-Term": tk.StringVar(value="0.00"),
+            "I-Term": tk.StringVar(value="0.00"),
+            "D-Term": tk.StringVar(value="0.00"),
+            "Output %": tk.StringVar(value="0.0 %") # Changed from PWM to Output %
+        }
+        for key, var in self.status_vars.items():
+            container = ttk.Frame(self.sidebar, padding=5)
+            container.pack(fill="x", pady=2)
+            ttk.Label(container, text=f"{key}:", font=BOLD_FONT).pack(anchor="w")
+            ttk.Label(container, textvariable=var, font=MONO_FONT, foreground="#0055aa").pack(anchor="w", padx=10)
+            ttk.Separator(self.sidebar, orient="horizontal").pack(fill="x", pady=8)
+
+    def create_plot_frame(self):
+        self.plot_container = ttk.Frame(self.paned)
+        self.paned.add(self.plot_container, weight=4) 
+        self.fig, self.ax = plt.subplots(figsize=(8, 5))
+        self.fig.patch.set_facecolor('#f4f6f9') 
+        self.ax.set_facecolor('#ffffff')
+        self.ax.set_title("Live Temperature Data & Heater Output")
+        self.ax.set_xlabel("Time (s)")
+        self.ax.set_ylabel("Temperature (°C)", color='black')
+        self.ax.grid(True, linestyle='--', alpha=0.7)
+        
+        # Primary Y-Axis Lines (Temperature)
+        self.line_temp, = self.ax.plot([], [], 'r-', linewidth=2.5, label='Temp')
+        self.line_sp, = self.ax.plot([], [], 'b--', linewidth=2, label='Setpoint')
+        
+        # Secondary Y-Axis (Output %)
+        self.ax2 = self.ax.twinx()
+        self.ax2.set_ylabel("Output Power (%)", color='green')
+        self.ax2.tick_params(axis='y', labelcolor='green')
+        self.ax2.set_ylim(-2, 105) 
+        self.line_out, = self.ax2.plot([], [], 'g-', linewidth=2, alpha=0.6, label='Output %')
+        
+        # Combine legends into one box
+        lines = [self.line_temp, self.line_sp, self.line_out]
+        labels = [l.get_label() for l in lines]
+        self.ax.legend(lines, labels, loc='upper left')
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_container)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.plot_container)
+        self.toolbar.update()
+
+    def create_terminal_frame(self):
+        frame = ttk.LabelFrame(self.paned, text="Raw Serial Monitor", padding=10)
+        self.paned.add(frame, weight=1)
+        self.terminal = scrolledtext.ScrolledText(
+            frame, height=8, state='disabled', 
+            background="#1e1e1e", foreground="#00ff00", 
+            font=TERMINAL_FONT
+        )
+        self.terminal.pack(fill="both", expand=True, pady=(0, 5))
+        
+        ctrl_frame = ttk.Frame(frame)
+        ctrl_frame.pack(fill="x")
+        self.autoscroll = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ctrl_frame, text="Autoscroll", variable=self.autoscroll).pack(side="left")
+        ttk.Button(ctrl_frame, text="Clear Output", command=self.clear_terminal).pack(side="right")
+
+    def read_serial_data(self):
+        while not self.stop_thread and self.ser and self.ser.is_open:
+            try:
+                line = self.ser.readline().decode('utf-8', errors='replace').strip()
+                if line:
+                    self.log_to_terminal(line)
+                    clean_line = re.sub(r'[a-zA-Z]+=', '', line)
+                    parts = re.split(r'[,\s|]+', clean_line)
+                    parts = [p for p in parts if p] 
+
+                    if len(parts) >= 10:
+                        try:
+                            mode_val = "PID" if parts[0] == "0" else "MANUAL"
+                            t_val = float(parts[1])
+                            temp_val = float(parts[2])
+                            sp_val = float(parts[3])
+                            out_val = float(parts[5]) # Output Percentage index from Arduino
+                            
+                            self.times.append(t_val)
+                            self.temps.append(temp_val)
+                            self.setpoints.append(sp_val)
+                            self.outputs.append(out_val)
+
+                            self.status_vars["Mode"].set(mode_val)
+                            self.status_vars["Temp"].set(f"{temp_val:.2f} °C")
+                            self.status_vars["Setpoint"].set(f"{sp_val:.2f} °C")
+                            self.status_vars["Error"].set(f"{float(parts[4]):.2f}")
+                            self.status_vars["P-Term"].set(f"{float(parts[7]):.2f}")
+                            self.status_vars["I-Term"].set(f"{float(parts[8]):.2f}")
+                            self.status_vars["D-Term"].set(f"{float(parts[9]):.2f}")
+                            self.status_vars["Output %"].set(f"{out_val:.1f} %") # Replaced PWM update
+
+                            if self.is_recording and self.csv_writer:
+                                self.csv_writer.writerow(parts)
+                        except (ValueError, IndexError): 
+                            pass
+            except Exception: 
+                break
+
+    def toggle_csv_mode(self):
+        if self.is_connected: self.ser.write(b"x\n")
+
+    def send_mode_toggle(self):
+        if self.is_connected:
+            self.ser.write(b"T\n")
+
+    def toggle_recording(self):
+        if not self.is_recording:
+            fn = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+            if fn:
+                self.csv_file = open(fn, 'w', newline=''); self.csv_writer = csv.writer(self.csv_file)
+                self.csv_writer.writerow(["Mode", "Time", "Temp", "Setpoint", "Error", "Output%", "PWM", "P", "I", "D", "Kp", "Ki", "Kd"])
+                self.is_recording = True
+                self.btn_record.config(text="Stop Recording")
+                self.lbl_rec_status.config(text="● Recording", foreground="#ff0000") 
+        else:
+            self.is_recording = False
+            if self.csv_file: self.csv_file.close()
+            self.btn_record.config(text="Start Recording")
+            self.lbl_rec_status.config(text="Not Recording", foreground="#888888")
+
+    def toggle_connection(self):
+        if not self.is_connected:
+            try:
+                self.ser = serial.Serial(self.port_combobox.get(), BAUD_RATE, timeout=0.1)
+                self.is_connected = True; self.btn_connect.config(text="Disconnect"); self.stop_thread = False
+                threading.Thread(target=self.read_serial_data, daemon=True).start()
+                self.csv_mode_var.set(False)
+            except Exception as e: messagebox.showerror("Error", str(e))
+        else:
+            self.stop_thread = True
+            if self.ser: self.ser.close()
+            self.is_connected = False; self.btn_connect.config(text="Connect")
+
+    def update_all_params(self):
+        if not self.is_connected: return
+        for cmd, entry in self.entries.items():
+            val = entry.get()
+            if val: 
+                self.ser.write(f"{cmd}{val}\n".encode())
+                time.sleep(0.05)
+
+    def log_to_terminal(self, msg):
+        self.terminal.configure(state='normal')
+        self.terminal.insert(tk.END, msg + "\n")
+        if self.autoscroll.get(): self.terminal.see(tk.END)
+        self.terminal.configure(state='disabled')
+
+    def clear_terminal(self):
+        self.terminal.configure(state='normal')
+        self.terminal.delete('1.0', tk.END)
+        self.terminal.configure(state='disabled')
+
+    def update_plot(self, frame):
+        if self.is_connected and len(self.times) > 1:
+            self.line_temp.set_data(list(self.times), list(self.temps))
+            self.line_sp.set_data(list(self.times), list(self.setpoints))
+            self.line_out.set_data(list(self.times), list(self.outputs)) 
+            
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw_idle()
+
+    def refresh_ports(self):
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.port_combobox['values'] = ports
+        if ports: self.port_combobox.current(0)
+
+    def close_application(self):
+        self.stop_thread = True
+        if self.is_recording and self.csv_file: self.csv_file.close()
+        if self.ser and self.ser.is_open: self.ser.close()
+        self.root.quit(); self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PIDControllerApp(root)
+    root.mainloop()
