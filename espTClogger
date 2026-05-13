@@ -1,0 +1,169 @@
+#include "max6675.h"
+#include "SD.h"
+#include "SPI.h"
+#include <Wire.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
+
+
+#define I2C_ADDRESS 0x3C  // Default I2C address for the OLED
+SSD1306AsciiWire oled;
+
+
+const int buttonPin = 4;
+
+
+const int thermoDO = 27;
+const int thermoCS = 14;
+const int thermoCLK = 13;
+
+
+const int ledPin = 2;
+
+
+const int chipSelect = 5;
+
+
+bool buttonState = false;
+bool lastButtonState = false;
+bool recordingState = false;
+
+
+unsigned long lastRecording = 0;
+unsigned long startTime = 0;
+const unsigned long recordingTime = 2000;
+
+
+MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
+
+
+File file;
+
+
+String fileName;
+
+
+void setup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+
+  Serial.begin(115200);
+  Serial.println("Initializing SD card...");
+
+
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card mount failed! Check connections or chip select pin.");
+    return;
+  }
+
+
+  Serial.println("SD card initialized.");
+
+
+  Wire.begin();
+  oled.begin(&Adafruit128x64, I2C_ADDRESS);
+  oled.setFont(System5x7);
+ 
+  // Initial screen setup
+  oled.clear();
+  oled.println("  Temperature Logger");
+  oled.println("Press button to start");
+}
+
+
+void loop() {
+  bool buttonState = digitalRead(buttonPin);
+
+
+  if (buttonState != lastButtonState) {
+    if (buttonState == LOW) {
+      recordingState = !recordingState;
+      startTime = millis();
+
+
+      if (recordingState) {
+        // Create a unique file name based on the timestamp
+        fileName = "/log_" + String(millis()) + ".txt";
+        Serial.println("New file created: " + fileName);
+        digitalWrite(ledPin, HIGH);
+
+
+        // Create the new file and add the header
+        File file = SD.open(fileName, FILE_WRITE);
+        if (file) {
+          file.println("Temperature (C) , Time (s)");
+          file.close();
+        } else {
+          Serial.println("Failed to create file.");
+        }
+        }else
+        {
+          digitalWrite(ledPin, LOW);
+      }
+
+
+      Serial.print("Button Pressed ");
+      Serial.println(recordingState ? "ON" : "OFF");
+    }
+    delay(50);
+  }
+  lastButtonState = buttonState;
+
+
+  unsigned long elapsedTime = (millis() - startTime) / 1000;
+
+
+  if (recordingState && millis() - lastRecording >= recordingTime) {
+    float temperature = thermocouple.readCelsius();
+    Serial.print(temperature);
+    Serial.print(",");
+    Serial.println(elapsedTime);
+
+
+    // Display temperature and time in larger text
+    oled.clear();
+    oled.setFont(Arial_bold_14);  // Change to a larger font
+    oled.setCursor(0, 0);
+    oled.print("Temp: ");
+    oled.print(temperature);
+    oled.println(" C");
+
+
+    oled.setCursor(0, 2);
+    oled.print("Time: ");
+    oled.print(elapsedTime);
+    oled.println(" s");
+
+
+    oled.setFont(System5x7);  // Smaller font for the file name
+    oled.setCursor(0, 5);
+    oled.print("File: ");
+    oled.print(fileName);
+
+
+    // Append data to the current file
+    File file = SD.open(fileName, FILE_APPEND);
+    if (file) {
+      file.print(elapsedTime);
+      file.print(", ");
+      file.println(temperature);
+      file.close();
+    } else {
+      Serial.println("Failed to open file for writing.");
+    }
+
+
+    lastRecording = millis();
+  }
+}
+
+
+
+
+
+
+
+
+
